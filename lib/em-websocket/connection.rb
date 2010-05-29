@@ -1,4 +1,5 @@
 require 'addressable/uri'
+require 'digest/md5'
 
 module EventMachine
   module WebSocket
@@ -53,7 +54,8 @@ module EventMachine
       end
 
       def new_request
-        if @data.match(/\r\n\r\n$/)
+        @data.force_encoding('BINARY')
+        if @data.match(/Sec-WebSocket/)
           debug [:inbound_headers, @data]
           lines = @data.split("\r\n")
 
@@ -67,8 +69,9 @@ module EventMachine
             # extract remaining headers
             lines.each do |line|
               h = HEADER.match(line)
-              @request[h[1].strip] = h[2].strip
+              @request[h[1].strip] = h[2].strip unless h.nil?
             end
+            @request[:last_bits] = lines.last
 
             # transform headers
             @request['Host'] = Addressable::URI.parse("ws://"+@request['Host'])
@@ -102,6 +105,19 @@ module EventMachine
       def websocket_connection?
         @request['Connection'] == 'Upgrade' and @request['Upgrade'] == 'WebSocket'
       end
+      
+      def calculate_key
+        ws_key1_numbers = @request['Sec-WebSocket-Key1'].gsub(/[^\d]/,'').to_i
+        ws_key2_numbers = @request['Sec-WebSocket-Key2'].gsub(/[^\d]/,'').to_i
+        ws_key1_spaces = @request['Sec-WebSocket-Key1'].gsub(/[^\s]/,'').size
+        ws_key2_spaces = @request['Sec-WebSocket-Key2'].gsub(/[^\s]/,'').size
+        
+        ws_part1 = [ws_key1_numbers/ws_key1_spaces].pack('N')
+        ws_part2 = [ws_key2_numbers/ws_key2_spaces].pack('N')
+        Digest::MD5.digest("#{ws_part1}#{ws_part2}#{@request[:last_bits]}")
+      rescue => e
+        debug [:calculate_key_error, e]
+      end
 
       def send_upgrade
         location  = "ws://#{@request['Host'].host}"
@@ -111,9 +127,9 @@ module EventMachine
         upgrade =  "HTTP/1.1 101 Web Socket Protocol Handshake\r\n"
         upgrade << "Upgrade: WebSocket\r\n"
         upgrade << "Connection: Upgrade\r\n"
-        upgrade << "WebSocket-Origin: #{@request['Origin']}\r\n"
-        upgrade << "WebSocket-Location: #{location}\r\n\r\n"
-
+        upgrade << "Sec-WebSocket-Origin: #{@request['Origin']}\r\n"
+        upgrade << "Sec-WebSocket-Location: #{location}\r\n\r\n"
+        upgrade << calculate_key
         # upgrade connection and notify client callback
         # about completed handshake
         debug [:upgrade_headers, upgrade]
